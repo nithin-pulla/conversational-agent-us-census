@@ -17,6 +17,17 @@ from db import fetch_schema_metadata, close_connection
 from retrieval import bootstrap_retriever
 
 load_dotenv()
+
+# Streamlit Cloud: copy st.secrets into os.environ so all existing
+# os.environ["KEY"] calls in db.py and agent.py work without changes.
+# Local dev: .env file loaded above takes precedence (already in os.environ).
+try:
+    for _k, _v in st.secrets.items():
+        if _k not in os.environ:
+            os.environ[_k] = str(_v)
+except Exception:
+    pass  # No secrets configured — local .env mode
+
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
