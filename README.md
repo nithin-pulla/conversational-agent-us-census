@@ -309,6 +309,13 @@ If `sentence-transformers` cannot be loaded, the retriever degrades gracefully t
 
 ## Troubleshooting
 
+**`No matching distribution found for streamlit` (or any other package)**
+Your pip is outdated and cannot see newer package versions. Upgrade it first, then retry:
+```bash
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
 **`KeyError: SNOWFLAKE_ACCOUNT`**
 Your credentials are not set. Locally: check that `.env` exists and is filled in. On Streamlit Cloud: verify the secrets are pasted correctly in the Secrets panel.
 
