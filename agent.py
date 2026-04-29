@@ -25,7 +25,7 @@ from typing import Any, List, Optional, Tuple
 from openai import OpenAI
 from dotenv import load_dotenv
 
-from db import QueryError, run_query
+from db import QueryError, UnsafeQueryError, run_query
 from retrieval import get_retriever
 
 load_dotenv()
@@ -322,6 +322,12 @@ def run_react_loop(
                 result_text = _rows_to_text(rows)
                 row_count = len(rows)
                 feedback = f"SQL executed successfully. Returned {row_count} row(s):\n{result_text}"
+            except UnsafeQueryError as uqe:
+                feedback = (
+                    f"SAFETY VIOLATION — query blocked before execution: {uqe}\n"
+                    "You must only generate read-only SELECT statements. "
+                    "Rewrite the query as a SELECT and try again."
+                )
             except QueryError as qe:
                 feedback = f"SQL ERROR: {qe}\nPlease fix the query and try again."
 

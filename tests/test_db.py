@@ -29,6 +29,85 @@ def reset_connection():
     db._connection = None
 
 
+class TestValidateSql:
+    """_validate_sql must block writes and pass reads without touching Snowflake."""
+
+    def setup_method(self):
+        import db
+        self._validate = db._validate_sql
+
+    # --- allowed ---
+
+    def test_plain_select(self):
+        self._validate("SELECT 1")
+
+    def test_select_with_whitespace(self):
+        self._validate("  SELECT * FROM foo  ")
+
+    def test_with_cte(self):
+        self._validate("WITH cte AS (SELECT 1) SELECT * FROM cte")
+
+    def test_select_after_inline_comment(self):
+        # comment stripped, first real keyword is SELECT
+        self._validate("-- find totals\nSELECT COUNT(*) FROM bar")
+
+    def test_select_after_block_comment(self):
+        self._validate("/* analytics */ SELECT id FROM users")
+
+    # --- blocked: leading verb ---
+
+    @pytest.mark.parametrize("sql", [
+        "DROP TABLE foo",
+        "DELETE FROM bar",
+        "INSERT INTO t VALUES (1)",
+        "UPDATE t SET x=1",
+        "CREATE TABLE t (id INT)",
+        "ALTER TABLE t ADD COLUMN x INT",
+        "TRUNCATE TABLE t",
+        "GRANT SELECT ON t TO user1",
+        "REVOKE SELECT ON t FROM user1",
+        "COPY INTO t FROM @stage",
+        "CALL my_proc()",
+        "EXECUTE IMMEDIATE 'DROP TABLE foo'",
+        "USE ROLE SYSADMIN",
+    ])
+    def test_blocked_leading_keyword(self, sql):
+        import db
+        with pytest.raises(db.UnsafeQueryError):
+            self._validate(sql)
+
+    # --- blocked: semicolon-separated payload ---
+
+    def test_semicolon_drop_after_select(self):
+        import db
+        with pytest.raises(db.UnsafeQueryError, match="DROP"):
+            self._validate("SELECT 1; DROP TABLE foo")
+
+    def test_semicolon_insert_after_select(self):
+        import db
+        with pytest.raises(db.UnsafeQueryError, match="INSERT"):
+            self._validate("SELECT * FROM t; INSERT INTO t VALUES (1)")
+
+    # --- blocked: comment-hidden payload ---
+
+    def test_ddl_hidden_in_block_comment_is_safe(self):
+        # The DROP is inside a comment — after stripping, first keyword is SELECT
+        self._validate("/* DROP TABLE foo */ SELECT 1")
+
+    def test_empty_query_rejected(self):
+        import db
+        with pytest.raises(db.UnsafeQueryError, match="Empty"):
+            self._validate("   ")
+
+    def test_run_query_blocks_before_snowflake(self, mocker):
+        """UnsafeQueryError must be raised before any Snowflake connection is made."""
+        import db
+        connect_mock = mocker.patch("db.snowflake.connector.connect")
+        with pytest.raises(db.UnsafeQueryError):
+            db.run_query("DROP TABLE foo")
+        connect_mock.assert_not_called()
+
+
 class TestRunQuery:
     def test_happy_path_returns_rows(self, mocker):
         import db

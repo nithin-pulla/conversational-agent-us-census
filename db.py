@@ -72,21 +72,88 @@ def close_connection() -> None:
 
 MAX_ROWS = 500  # Safety cap — avoids dumping huge result sets into the LLM
 
+# DDL/DML verbs that must never appear as the leading statement keyword.
+# This covers SQL injection and prompt-injection payloads even when the
+# attacker tries to smuggle a write behind a comment or semicolon.
+_BLOCKED_KEYWORDS = frozenset({
+    "insert", "update", "delete", "merge", "upsert",
+    "create", "alter", "drop", "truncate", "replace",
+    "grant", "revoke", "deny",
+    "copy", "put", "get",                  # Snowflake bulk-load / unload
+    "call", "execute", "exec",             # stored procedures
+    "begin", "commit", "rollback",         # transaction control
+    "use",                                 # role / database switching
+})
+
 
 class QueryError(Exception):
     """Raised when Snowflake returns an error for a generated SQL statement."""
+
+
+class UnsafeQueryError(QueryError):
+    """Raised when SQL fails the safety check before reaching Snowflake."""
+
+
+def _validate_sql(sql: str) -> None:
+    """
+    Reject any SQL that is not a read-only SELECT (or WITH…SELECT) statement.
+
+    Strategy — two complementary checks:
+    1. Leading-keyword check: the first real keyword must be SELECT or WITH.
+    2. Blocked-keyword scan: no statement in the batch may start with a
+       write/admin verb (catches semicolon-separated payloads).
+
+    Both checks operate on normalised, comment-stripped text so that tricks
+    like `/* DROP */ SELECT` or `--\nDROP` are caught.
+
+    Raises UnsafeQueryError for anything that fails.
+    """
+    import re
+
+    # Strip single-line (--) and block (/* */) comments, then collapse whitespace.
+    stripped = re.sub(r"--[^\n]*", " ", sql)
+    stripped = re.sub(r"/\*.*?\*/", " ", stripped, flags=re.DOTALL)
+    stripped = stripped.strip()
+
+    if not stripped:
+        raise UnsafeQueryError("Empty query rejected.")
+
+    # Extract the first keyword of the whole statement.
+    first_keyword = re.match(r"[a-zA-Z_]+", stripped)
+    if not first_keyword or first_keyword.group(0).lower() not in ("select", "with"):
+        raise UnsafeQueryError(
+            f"Only SELECT queries are permitted. Got leading keyword: "
+            f"'{first_keyword.group(0) if first_keyword else stripped[:20]}'"
+        )
+
+    # Scan every semicolon-separated segment for blocked leading keywords.
+    # This catches `SELECT 1; DROP TABLE foo` payloads.
+    for segment in re.split(r";", stripped):
+        seg = segment.strip()
+        if not seg:
+            continue
+        kw_match = re.match(r"[a-zA-Z_]+", seg)
+        if kw_match and kw_match.group(0).lower() in _BLOCKED_KEYWORDS:
+            raise UnsafeQueryError(
+                f"Statement contains forbidden keyword '{kw_match.group(0)}'. "
+                "Only read-only SELECT queries are allowed."
+            )
 
 
 def run_query(sql: str, max_rows: int = MAX_ROWS) -> List[dict]:
     """
     Execute *sql* against Snowflake and return at most *max_rows* rows.
 
+    Validates that the query is read-only before sending it to Snowflake.
+
     Returns:
         A list of dicts, one per row (column-name → value).
 
     Raises:
+        UnsafeQueryError: if the SQL fails the read-only safety check.
         QueryError: on any Snowflake-level or network error.
     """
+    _validate_sql(sql)
     conn = get_connection()
     logger.debug("Executing SQL:\n%s", sql)
     try:
